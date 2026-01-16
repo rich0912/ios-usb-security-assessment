@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Reports / customer data
+reports/
+out_report/
+*.json
+
+# Virtual env
+.venv/

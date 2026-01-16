@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+from datetime import datetime
+
+
+def load_json(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def safe_get(d: dict, path: list):
+    cur = d
+    for k in path:
+        if cur is None:
+            return None
+        if isinstance(cur, dict):
+            cur = cur.get(k)
+        else:
+            return None
+    return cur
+
+
+def iso_now_local() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def coerce_list(x):
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return x
+    # 兼容某些工具輸出可能是 dict 或 str
+    return [str(x)]
+
+
+def rating_for_list(items: list, empty_rating="PASS", nonempty_rating="INFO"):
+    return empty_rating if len(items) == 0 else nonempty_rating
+
+
+def rating_for_bool(flag: bool | None, false_rating="PASS", true_rating="INFO"):
+    if flag is True:
+        return true_rating
+    return false_rating
+
+
+def build_findings_for_device(device: dict) -> dict:
+    """
+    依你的 JSON schema 產出標準化 findings 結構：
+    - 每一項包含：id/title/risk/status/evidence
+    """
+    device_info = device.get("device_info") or {}
+    profiles = device.get("profiles") or {}
+    apps = device.get("apps") or {}
+    vpn = device.get("vpn") or {}
+
+    # 兼容兩種 apps 結構：
+    # - apps.classification.<x>.items
+    # - apps.classification.<x> 直接是 list (舊版)
+    cls = apps.get("classification") or {}
+
+    def cls_items(key: str) -> list:
+        v = cls.get(key)
+        if isinstance(v, dict) and "items" in v:
+            return coerce_list(v.get("items"))
+        return coerce_list(v)
+
+    location_apps = cls_items("location_capable_apps")
+    multi_device_apps = cls_items("multi_device_login_capable_apps")
+    non_appstore_apps = cls_items("non_app_store_suspected_apps")
+
+    cfg_count = profiles.get("configuration_profiles_count")
+    prov_count = profiles.get("provisioning_profiles_count")
+    has_cfg = profiles.get("has_configuration_profiles")
+    has_prov = profiles.get("has_provisioning_profiles")
+
+    # 統一成 count 判定（若 count 缺失則用 bool）
+    cfg_present = (cfg_count or 0) > 0 if cfg_count is not None else bool(has_cfg)
+    prov_present = (prov_count or 0) > 0 if prov_count is not None else bool(has_prov)
+
+    vpn_present = bool(vpn.get("present"))
+    vpn_apps = coerce_list(vpn.get("apps"))
+
+    findings = [
+        {
+            "id": "V-01",
+            "title": "裝置基本資訊可被列舉",
+            "risk": "Low",
+            "status": "INFO",  # 這項通常做資訊揭露盤點，對外報告多標 INFO
+            "evidence": {
+                "DeviceName": device_info.get("DeviceName"),
+                "ProductType": device_info.get("ProductType"),
+                "ProductVersion": device_info.get("ProductVersion"),
+                "BuildVersion": device_info.get("BuildVersion"),
+                "UniqueDeviceID": device_info.get("UniqueDeviceID"),
+                "SerialNumber": device_info.get("SerialNumber"),
+            },
+        },
+        {
+            "id": "V-02",
+            "title": "存在描述檔（Configuration Profile）",
+            "risk": "Medium",
+            "status": "INFO" if cfg_present else "PASS",
+            "evidence": {
+                "configuration_profiles_count": cfg_count,
+                "has_configuration_profiles": has_cfg,
+            },
+        },
+        {
+            "id": "V-03",
+            "title": "存在 Provisioning Profile",
+            "risk": "Medium",
+            "status": "INFO" if prov_present else "PASS",
+            "evidence": {
+                "provisioning_profiles_count": prov_count,
+                "has_provisioning_profiles": has_prov,
+            },
+        },
+        {
+            "id": "V-04",
+            "title": "安裝 VPN（App 型）",
+            "risk": "Medium",
+            "status": "INFO" if vpn_present else "PASS",
+            "evidence": {
+                "vpn_present": vpn_present,
+                "vpn_apps": vpn_apps,
+            },
+        },
+        {
+            "id": "V-05",
+            "title": "具定位能力之 App（能力推定）",
+            "risk": "Medium",
+            "status": rating_for_list(location_apps, "PASS", "INFO"),
+            "evidence": {
+                "apps": location_apps,
+                "count": len(location_apps),
+            },
+        },
+        {
+            "id": "V-06",
+            "title": "同帳號可多裝置登入 App（能力推定）",
+            "risk": "Medium",
+            "status": rating_for_list(multi_device_apps, "PASS", "INFO"),
+            "evidence": {
+                "apps": multi_device_apps,
+                "count": len(multi_device_apps),
+            },
+        },
+        {
+            "id": "V-07",
+            "title": "疑似非 App Store 來源 App",
+            "risk": "High",
+            # 你要求對外交付：此項若命中通常視為高風險（FAIL）
+            "status": rating_for_list(non_appstore_apps, "PASS", "FAIL"),
+            "evidence": {
+                "apps": non_appstore_apps,
+                "count": len(non_appstore_apps),
+            },
+        },
+    ]
+
+    # 統計
+    stat = {"PASS": 0, "INFO": 0, "FAIL": 0}
+    for f in findings:
+        stat[f["status"]] = stat.get(f["status"], 0) + 1
+
+    return {
+        "device_info": device_info,
+        "findings": findings,
+        "summary_counts": stat,
+    }
+
+
+def md_escape(s):
+    if s is None:
+        return ""
+    return str(s).replace("|", "\\|")
+
+
+def render_markdown(device_block: dict, report_meta: dict) -> str:
+    di = device_block["device_info"]
+    counts = device_block["summary_counts"]
+    findings = device_block["findings"]
+
+    lines = []
+    lines.append("# 行動裝置弱點掃描評估報告（自動彙總）")
+    lines.append("")
+    lines.append("## 文件資訊")
+    lines.append("")
+    lines.append("| 項目 | 內容 |")
+    lines.append("|---|---|")
+    lines.append(f"| 報告產出時間 | {md_escape(report_meta.get('generated_at'))} |")
+    lines.append(f"| 來源檔案 | {md_escape(report_meta.get('source_file'))} |")
+    lines.append(f"| 掃描方式 | USB 連線（非侵入式） |")
+    lines.append("")
+    lines.append("## 裝置資訊")
+    lines.append("")
+    lines.append("| 欄位 | 值 |")
+    lines.append("|---|---|")
+    lines.append(f"| 裝置名稱 | {md_escape(di.get('DeviceName'))} |")
+    lines.append(f"| 裝置型號 | {md_escape(di.get('ProductType'))} |")
+    lines.append(f"| iOS 版本 | {md_escape(di.get('ProductVersion'))} |")
+    lines.append(f"| Build | {md_escape(di.get('BuildVersion'))} |")
+    lines.append(f"| UDID | {md_escape(di.get('UniqueDeviceID'))} |")
+    lines.append(f"| Serial | {md_escape(di.get('SerialNumber'))} |")
+    lines.append("")
+    lines.append("## 結果摘要")
+    lines.append("")
+    lines.append("| PASS | INFO | FAIL |")
+    lines.append("|---:|---:|---:|")
+    lines.append(f"| {counts.get('PASS',0)} | {counts.get('INFO',0)} | {counts.get('FAIL',0)} |")
+    lines.append("")
+    lines.append("## 弱點檢測明細")
+    lines.append("")
+    lines.append("| 編號 | 項目 | 風險等級 | 狀態 | 佐證摘要 |")
+    lines.append("|---|---|---|---|---|")
+
+    for f in findings:
+        ev = f.get("evidence") or {}
+        # 選擇性摘要（避免太長）
+        if f["id"] == "V-04":
+            ev_txt = f"vpn_present={ev.get('vpn_present')}, vpn_apps={len(ev.get('vpn_apps') or [])}"
+        elif f["id"] in ("V-05", "V-06", "V-07"):
+            ev_txt = f"count={ev.get('count')}"
+        elif f["id"] in ("V-02", "V-03"):
+            ev_txt = f"count={ev.get('configuration_profiles_count') if f['id']=='V-02' else ev.get('provisioning_profiles_count')}"
+        else:
+            ev_txt = "device fields collected"
+        lines.append(f"| {f['id']} | {md_escape(f['title'])} | {f['risk']} | {f['status']} | {md_escape(ev_txt)} |")
+
+    lines.append("")
+    lines.append("## 附錄：命中清單")
+    lines.append("")
+    for f in findings:
+        if f["id"] in ("V-05", "V-06", "V-07"):
+            apps = (f.get("evidence") or {}).get("apps") or []
+            lines.append(f"### {f['id']} {f['title']}（{f['status']}）")
+            if not apps:
+                lines.append("- （無）")
+            else:
+                for a in apps:
+                    lines.append(f"- {md_escape(a)}")
+            lines.append("")
+        if f["id"] == "V-04":
+            apps = (f.get("evidence") or {}).get("vpn_apps") or []
+            lines.append(f"### {f['id']} {f['title']}（{f['status']}）")
+            if not apps:
+                lines.append("- （無）")
+            else:
+                for a in apps:
+                    lines.append(f"- {md_escape(a)}")
+            lines.append("")
+
+    return "\n".join(lines)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Convert iOS scan JSON to external delivery report fields")
+    parser.add_argument("--in", dest="inp", required=True, help="Input JSON: current_state.json or event report JSON")
+    parser.add_argument("--outdir", default="./out_report", help="Output directory")
+    args = parser.parse_args()
+
+    data = load_json(args.inp)
+    os.makedirs(args.outdir, exist_ok=True)
+
+    # 兼容兩種輸入：
+    # 1) current_state.json：含 devices
+    # 2) 單一事件 JSON：含 device_info/profiles/apps/vpn
+    if "devices" in data and isinstance(data["devices"], dict) and data["devices"]:
+        # 取第一台裝置（對外交付通常一台一份；若多台可自行迴圈）
+        udid = next(iter(data["devices"].keys()))
+        device = data["devices"][udid]
+        device_block = build_findings_for_device(device)
+    else:
+        # 將 event JSON 包成同結構
+        device = {
+            "device_info": data.get("device_info") or {},
+            "profiles": data.get("profiles") or {},
+            "apps": data.get("apps") or {},
+            "vpn": data.get("vpn") or {},
+        }
+        device_block = build_findings_for_device(device)
+
+    report_meta = {
+        "generated_at": iso_now_local(),
+        "source_file": os.path.abspath(args.inp),
+    }
+
+    # 輸出 JSON（標準化結構）
+    summary_path = os.path.join(args.outdir, "report_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {"meta": report_meta, **device_block},
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    # 輸出 Markdown（可直接貼進 Word / Google Doc）
+    md = render_markdown(device_block, report_meta)
+    md_path = os.path.join(args.outdir, "report.md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(md)
+
+    print(f"[OK] Wrote: {summary_path}")
+    print(f"[OK] Wrote: {md_path}")
+
+
+if __name__ == "__main__":
+    main()
