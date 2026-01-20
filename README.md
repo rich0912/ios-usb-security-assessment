@@ -18,5 +18,11 @@ This toolset inventories device metadata, summarizes profile signals, enumerates
 - App classifications are capability-based heuristics, not proof of current permissions, login status, or active usage.
 - Do NOT commit customer scan outputs (reports) into the repository.
 
+## Optional Accuracy Signals
+- Bundle ID overrides: `rules/app_bundle_overrides.json`
+- App Store metadata lookup (sends bundle IDs to Apple): `python3 tools/ios_usb_audit.py --app-store`
+  - Cache: `./cache/app_store_cache.json`
+- VPN profile payload detection (via `cfgutil` JSON payloads)
+
 ## Requirements (macOS)
 Install dependencies:

@@ -9,6 +9,7 @@ __pycache__/
 reports/
 out_report/
 *.json
+!rules/app_bundle_overrides.json
 
 # Virtual env
 .venv/

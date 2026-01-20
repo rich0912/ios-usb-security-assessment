@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 import argparse
 import json
 import os
@@ -55,10 +56,13 @@ def build_findings_for_device(device: dict) -> dict:
     apps = device.get("apps") or {}
     vpn = device.get("vpn") or {}
 
-    # 兼容兩種 apps 結構：
+    # 兼容多種 apps 結構：
     # - apps.classification.<x>.items
     # - apps.classification.<x> 直接是 list (舊版)
-    cls = apps.get("classification") or {}
+    # - apps.<x>.items（新版工具直接輸出分類在 apps 下）
+    cls = apps.get("classification")
+    if not isinstance(cls, dict):
+        cls = apps if isinstance(apps, dict) else {}
 
     def cls_items(key: str) -> list:
         v = cls.get(key)
@@ -66,7 +70,18 @@ def build_findings_for_device(device: dict) -> dict:
             return coerce_list(v.get("items"))
         return coerce_list(v)
 
-    location_apps = cls_items("location_capable_apps")
+    location_block = cls.get("location_capable_apps")
+    if isinstance(location_block, dict):
+        location_apps = coerce_list(location_block.get("items"))
+        location_evidence = location_block.get("evidence") or {}
+        location_features = location_block.get("features") or {}
+        location_summary = location_block.get("summary") or {}
+    else:
+        location_apps = coerce_list(location_block)
+        location_evidence = {}
+        location_features = {}
+        location_summary = {}
+
     multi_device_apps = cls_items("multi_device_login_capable_apps")
     non_appstore_apps = cls_items("non_app_store_suspected_apps")
 
@@ -81,6 +96,9 @@ def build_findings_for_device(device: dict) -> dict:
 
     vpn_present = bool(vpn.get("present"))
     vpn_apps = coerce_list(vpn.get("apps"))
+    vpn_profile_payloads = vpn.get("profile_payloads")
+    if not isinstance(vpn_profile_payloads, list):
+        vpn_profile_payloads = []
 
     findings = [
         {
@@ -125,6 +143,7 @@ def build_findings_for_device(device: dict) -> dict:
             "evidence": {
                 "vpn_present": vpn_present,
                 "vpn_apps": vpn_apps,
+                "vpn_profile_payloads": vpn_profile_payloads,
             },
         },
         {
@@ -135,6 +154,9 @@ def build_findings_for_device(device: dict) -> dict:
             "evidence": {
                 "apps": location_apps,
                 "count": len(location_apps),
+                "location_summary": location_summary,
+                "location_features": location_features,
+                "location_evidence": location_evidence,
             },
         },
         {
@@ -220,8 +242,23 @@ def render_markdown(device_block: dict, report_meta: dict) -> str:
         ev = f.get("evidence") or {}
         # 選擇性摘要（避免太長）
         if f["id"] == "V-04":
-            ev_txt = f"vpn_present={ev.get('vpn_present')}, vpn_apps={len(ev.get('vpn_apps') or [])}"
-        elif f["id"] in ("V-05", "V-06", "V-07"):
+            ev_txt = (
+                f"vpn_present={ev.get('vpn_present')}, "
+                f"vpn_apps={len(ev.get('vpn_apps') or [])}, "
+                f"vpn_profiles={len(ev.get('vpn_profile_payloads') or [])}"
+            )
+        elif f["id"] == "V-05":
+            summary = ev.get("location_summary") or {}
+            if isinstance(summary, dict) and summary:
+                ev_txt = (
+                    f"count={ev.get('count')} "
+                    f"(high={summary.get('high',0)}, "
+                    f"medium={summary.get('medium',0)}, "
+                    f"low={summary.get('low',0)})"
+                )
+            else:
+                ev_txt = f"count={ev.get('count')}"
+        elif f["id"] in ("V-06", "V-07"):
             ev_txt = f"count={ev.get('count')}"
         elif f["id"] in ("V-02", "V-03"):
             ev_txt = f"count={ev.get('configuration_profiles_count') if f['id']=='V-02' else ev.get('provisioning_profiles_count')}"
@@ -233,7 +270,82 @@ def render_markdown(device_block: dict, report_meta: dict) -> str:
     lines.append("## 附錄：命中清單")
     lines.append("")
     for f in findings:
-        if f["id"] in ("V-05", "V-06", "V-07"):
+        if f["id"] == "V-05":
+            ev = f.get("evidence") or {}
+            apps = ev.get("apps") or []
+            summary = ev.get("location_summary") or {}
+            features = ev.get("location_features") or {}
+            evidence = ev.get("location_evidence") or {}
+            lines.append(f"### {f['id']} {f['title']}（{f['status']}）")
+            if not apps:
+                lines.append("- （無）")
+                lines.append("")
+                continue
+            if isinstance(summary, dict) and summary:
+                lines.append(
+                    "- Summary: "
+                    f"high={summary.get('high',0)}, "
+                    f"medium={summary.get('medium',0)}, "
+                    f"low={summary.get('low',0)}"
+                )
+            if isinstance(features, dict) and features:
+                for feature_id in sorted(features.keys()):
+                    feature = features.get(feature_id) or {}
+                    label = feature.get("label") or feature_id
+                    confidence = feature.get("confidence") or ""
+                    f_apps = feature.get("apps") or []
+                    count = len(f_apps)
+                    apps_txt = ", ".join(sorted(f_apps))
+                    if apps_txt:
+                        lines.append(
+                            f"- Feature: {md_escape(label)} "
+                            f"({md_escape(confidence)}) "
+                            f"count={count} apps={md_escape(apps_txt)}"
+                        )
+                    else:
+                        lines.append(
+                            f"- Feature: {md_escape(label)} "
+                            f"({md_escape(confidence)}) "
+                            f"count={count}"
+                        )
+            if isinstance(evidence, dict) and evidence:
+                for bundle_id in sorted(apps):
+                    app_ev = evidence.get(bundle_id) or {}
+                    display = app_ev.get("display_name")
+                    confidence = app_ev.get("confidence")
+                    matches = app_ev.get("matches") or []
+                    match_labels = []
+                    for match in matches:
+                        label = match.get("feature_label") or match.get("feature_id") or ""
+                        details = []
+                        keywords = match.get("keywords") or []
+                        if keywords:
+                            details.append(f"kw={', '.join(keywords)}")
+                        genre = match.get("genre")
+                        if genre:
+                            details.append(f"genre={genre}")
+                        source = match.get("source")
+                        if source:
+                            details.append(f"source={source}")
+                        if details:
+                            label = f"{label} ({'; '.join(details)})"
+                        if label:
+                            match_labels.append(label)
+                    match_txt = ", ".join(match_labels)
+                    parts = [f"App: {bundle_id}"]
+                    if display:
+                        parts.append(f"name={display}")
+                    if confidence:
+                        parts.append(f"confidence={confidence}")
+                    if match_txt:
+                        parts.append(f"matches={match_txt}")
+                    lines.append(f"- {md_escape(' | '.join(parts))}")
+            else:
+                for a in apps:
+                    lines.append(f"- {md_escape(a)}")
+            lines.append("")
+            continue
+        if f["id"] in ("V-06", "V-07"):
             apps = (f.get("evidence") or {}).get("apps") or []
             lines.append(f"### {f['id']} {f['title']}（{f['status']}）")
             if not apps:
@@ -244,12 +356,36 @@ def render_markdown(device_block: dict, report_meta: dict) -> str:
             lines.append("")
         if f["id"] == "V-04":
             apps = (f.get("evidence") or {}).get("vpn_apps") or []
+            payloads = (f.get("evidence") or {}).get("vpn_profile_payloads") or []
             lines.append(f"### {f['id']} {f['title']}（{f['status']}）")
             if not apps:
                 lines.append("- （無）")
             else:
                 for a in apps:
                     lines.append(f"- {md_escape(a)}")
+            if payloads:
+                lines.append("- VPN Profile Payloads:")
+                for payload in payloads:
+                    if not isinstance(payload, dict):
+                        lines.append(f"  - {md_escape(str(payload))}")
+                        continue
+                    payload_type = payload.get("payload_type")
+                    payload_id = payload.get("payload_identifier")
+                    display_name = payload.get("payload_display_name")
+                    confidence = payload.get("confidence")
+                    parts = []
+                    if payload_type:
+                        parts.append(f"type={payload_type}")
+                    if payload_id:
+                        parts.append(f"id={payload_id}")
+                    if display_name:
+                        parts.append(f"name={display_name}")
+                    if confidence:
+                        parts.append(f"confidence={confidence}")
+                    if parts:
+                        lines.append(f"  - {md_escape(' | '.join(parts))}")
+                    else:
+                        lines.append("  - (unknown payload)")
             lines.append("")
 
     return "\n".join(lines)

@@ -1,0 +1,29 @@
+{
+  "_comment": "Optional bundle-id overrides for location/VPN signals. Keys are bundle IDs (case-insensitive).",
+  "location_exclude": [],
+  "location": {
+    "com.apple.Maps": { "feature_id": "navigation_maps", "confidence": "high" },
+    "com.google.Maps": { "feature_id": "navigation_maps", "confidence": "high" },
+    "com.waze.iphone": { "feature_id": "navigation_maps", "confidence": "high" },
+    "com.kingwaytek.NaviKing3D": { "feature_id": "navigation_maps", "confidence": "high" },
+    "com.kingwaytek.NavikingTelematics": { "feature_id": "navigation_maps", "confidence": "high" },
+    "com.GKDNavi.0125": { "feature_id": "navigation_maps", "confidence": "high" },
+    "com.ubercab.UberClient": { "feature_id": "ride_hailing", "confidence": "high" },
+    "com.grabtaxi.iphone": { "feature_id": "ride_hailing", "confidence": "high" },
+    "ee.mtakso.client": { "feature_id": "ride_hailing", "confidence": "high" },
+    "com.dena.automotive.taxibell": { "feature_id": "ride_hailing", "confidence": "high" },
+    "tw.com.taiwantaxi.CallStation": { "feature_id": "ride_hailing", "confidence": "high" },
+    "tw.com.youbike.plus": { "feature_id": "shared_mobility", "confidence": "medium" },
+    "com.gogoro.goshare": { "feature_id": "shared_mobility", "confidence": "medium" },
+    "com.global.foodpanda.ios": { "feature_id": "delivery", "confidence": "medium" },
+    "com.windytv.ios": { "feature_id": "weather", "confidence": "low" }
+  },
+  "vpn": [
+    "net.openvpn.connect.app",
+    "com.fortinet.forticlient.vpn",
+    "com.wireguard.app",
+    "com.nordvpn.ios",
+    "com.expressvpn.ExpressVPN",
+    "com.protonvpn.ios"
+  ]
+}
