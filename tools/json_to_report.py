@@ -56,6 +56,24 @@ def build_findings_for_device(device: dict) -> dict:
     apps = device.get("apps") or {}
     vpn = device.get("vpn") or {}
 
+    apps_meta = apps if isinstance(apps, dict) else {}
+    app_list_complete = apps_meta.get("app_list_complete")
+    app_list_error = apps_meta.get("app_list_error")
+    app_list_error_code = apps_meta.get("app_list_error_code")
+    app_list_error_reason = apps_meta.get("app_list_error_reason")
+    app_list_error_detail = apps_meta.get("app_list_error_detail")
+    if isinstance(app_list_error, str) and "mc protected" in app_list_error.lower():
+        app_list_error_code = app_list_error_code or "MC_PROTECTED"
+        if not app_list_error_reason:
+            app_list_error_reason = "MDM"
+        if not app_list_error_detail:
+            app_list_error_detail = "MDM policy blocks USB app enumeration (lockdownd: MC protected)."
+    if app_list_complete is None:
+        if app_list_error is None:
+            app_list_complete = True if apps_meta else None
+        else:
+            app_list_complete = False
+
     # 兼容多種 apps 結構：
     # - apps.classification.<x>.items
     # - apps.classification.<x> 直接是 list (舊版)
@@ -89,10 +107,25 @@ def build_findings_for_device(device: dict) -> dict:
     prov_count = profiles.get("provisioning_profiles_count")
     has_cfg = profiles.get("has_configuration_profiles")
     has_prov = profiles.get("has_provisioning_profiles")
+    mdm_payloads = profiles.get("mdm_payloads")
+    if not isinstance(mdm_payloads, list):
+        mdm_payloads = []
+    has_mdm_payloads = profiles.get("has_mdm_payloads")
 
     # 統一成 count 判定（若 count 缺失則用 bool）
+    profiles_error = profiles.get("error") if isinstance(profiles, dict) else None
+    profiles_checked = (
+        isinstance(profiles, dict)
+        and (
+            "configuration_profiles_count" in profiles
+            or "provisioning_profiles_count" in profiles
+            or "available" in profiles
+        )
+        and not profiles_error
+    )
     cfg_present = (cfg_count or 0) > 0 if cfg_count is not None else bool(has_cfg)
     prov_present = (prov_count or 0) > 0 if prov_count is not None else bool(has_prov)
+    mdm_present = bool(has_mdm_payloads) or app_list_error_reason == "MDM"
 
     vpn_present = bool(vpn.get("present"))
     vpn_apps = coerce_list(vpn.get("apps"))
@@ -119,54 +152,85 @@ def build_findings_for_device(device: dict) -> dict:
             "id": "V-02",
             "title": "存在描述檔（Configuration Profile）",
             "risk": "Medium",
-            "status": "INFO" if cfg_present else "PASS",
+            "status": "INFO" if (not profiles_checked or cfg_present) else "PASS",
             "evidence": {
                 "configuration_profiles_count": cfg_count,
                 "has_configuration_profiles": has_cfg,
+                "profiles_checked": profiles_checked,
+                "profiles_error": profiles_error,
             },
         },
         {
             "id": "V-03",
             "title": "存在 Provisioning Profile",
             "risk": "Medium",
-            "status": "INFO" if prov_present else "PASS",
+            "status": "INFO" if (not profiles_checked or prov_present) else "PASS",
             "evidence": {
                 "provisioning_profiles_count": prov_count,
                 "has_provisioning_profiles": has_prov,
+                "profiles_checked": profiles_checked,
+                "profiles_error": profiles_error,
             },
         },
         {
             "id": "V-04",
             "title": "安裝 VPN（App 型）",
             "risk": "Medium",
-            "status": "INFO" if vpn_present else "PASS",
+            "status": (
+                "INFO"
+                if vpn_present or app_list_complete is not True or not profiles_checked
+                else "PASS"
+            ),
             "evidence": {
                 "vpn_present": vpn_present,
                 "vpn_apps": vpn_apps,
                 "vpn_profile_payloads": vpn_profile_payloads,
+                "app_list_complete": app_list_complete,
+                "profiles_checked": profiles_checked,
+            },
+        },
+        {
+            "id": "V-08",
+            "title": "裝置受 MDM 管理（存取受限）",
+            "risk": "Low",
+            "status": "INFO" if mdm_present else "PASS",
+            "evidence": {
+                "mdm_payloads_count": len(mdm_payloads),
+                "mdm_payloads": mdm_payloads,
+                "app_list_complete": app_list_complete,
+                "app_list_error": app_list_error,
+                "app_list_error_code": app_list_error_code,
+                "app_list_error_reason": app_list_error_reason,
+                "app_list_error_detail": app_list_error_detail,
             },
         },
         {
             "id": "V-05",
             "title": "具定位能力之 App（能力推定）",
             "risk": "Medium",
-            "status": rating_for_list(location_apps, "PASS", "INFO"),
+            "status": (
+                "INFO" if location_apps else ("PASS" if app_list_complete else "INFO")
+            ),
             "evidence": {
                 "apps": location_apps,
                 "count": len(location_apps),
                 "location_summary": location_summary,
                 "location_features": location_features,
                 "location_evidence": location_evidence,
+                "app_list_complete": app_list_complete,
             },
         },
         {
             "id": "V-06",
             "title": "同帳號可多裝置登入 App（能力推定）",
             "risk": "Medium",
-            "status": rating_for_list(multi_device_apps, "PASS", "INFO"),
+            "status": (
+                "INFO" if multi_device_apps else ("PASS" if app_list_complete else "INFO")
+            ),
             "evidence": {
                 "apps": multi_device_apps,
                 "count": len(multi_device_apps),
+                "app_list_complete": app_list_complete,
             },
         },
         {
@@ -174,10 +238,15 @@ def build_findings_for_device(device: dict) -> dict:
             "title": "疑似非 App Store 來源 App",
             "risk": "High",
             # 你要求對外交付：此項若命中通常視為高風險（FAIL）
-            "status": rating_for_list(non_appstore_apps, "PASS", "FAIL"),
+            "status": (
+                "FAIL"
+                if non_appstore_apps
+                else ("PASS" if app_list_complete else "INFO")
+            ),
             "evidence": {
                 "apps": non_appstore_apps,
                 "count": len(non_appstore_apps),
+                "app_list_complete": app_list_complete,
             },
         },
     ]
@@ -246,6 +315,11 @@ def render_markdown(device_block: dict, report_meta: dict) -> str:
                 f"vpn_present={ev.get('vpn_present')}, "
                 f"vpn_apps={len(ev.get('vpn_apps') or [])}, "
                 f"vpn_profiles={len(ev.get('vpn_profile_payloads') or [])}"
+            )
+        elif f["id"] == "V-08":
+            ev_txt = (
+                f"mdm_payloads={ev.get('mdm_payloads_count')}, "
+                f"app_list_error={ev.get('app_list_error_code')}"
             )
         elif f["id"] == "V-05":
             summary = ev.get("location_summary") or {}
@@ -386,6 +460,45 @@ def render_markdown(device_block: dict, report_meta: dict) -> str:
                         lines.append(f"  - {md_escape(' | '.join(parts))}")
                     else:
                         lines.append("  - (unknown payload)")
+            lines.append("")
+        if f["id"] == "V-08":
+            ev = f.get("evidence") or {}
+            payloads = ev.get("mdm_payloads") or []
+            lines.append(f"### {f['id']} {f['title']}（{f['status']}）")
+            if ev.get("app_list_error"):
+                lines.append(f"- App list error: {md_escape(ev.get('app_list_error'))}")
+            if ev.get("app_list_error_code") or ev.get("app_list_error_reason"):
+                lines.append(
+                    f"- App list error code: {md_escape(ev.get('app_list_error_code'))} "
+                    f"reason: {md_escape(ev.get('app_list_error_reason'))}"
+                )
+            if ev.get("app_list_error_detail"):
+                lines.append(f"- Reason detail: {md_escape(ev.get('app_list_error_detail'))}")
+            if payloads:
+                lines.append("- MDM Payloads:")
+                for payload in payloads:
+                    if not isinstance(payload, dict):
+                        lines.append(f"  - {md_escape(str(payload))}")
+                        continue
+                    payload_type = payload.get("payload_type")
+                    payload_id = payload.get("payload_identifier")
+                    display_name = payload.get("payload_display_name")
+                    confidence = payload.get("confidence")
+                    parts = []
+                    if payload_type:
+                        parts.append(f"type={payload_type}")
+                    if payload_id:
+                        parts.append(f"id={payload_id}")
+                    if display_name:
+                        parts.append(f"name={display_name}")
+                    if confidence:
+                        parts.append(f"confidence={confidence}")
+                    if parts:
+                        lines.append(f"  - {md_escape(' | '.join(parts))}")
+                    else:
+                        lines.append("  - (unknown payload)")
+            if not payloads and not ev.get("app_list_error"):
+                lines.append("- （無）")
             lines.append("")
 
     return "\n".join(lines)

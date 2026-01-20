@@ -119,6 +119,25 @@ def load_bundle_overrides(path: str) -> dict:
     return {"location": location, "location_exclude": location_exclude, "vpn": vpn}
 
 
+def app_list_error_info(
+    apps_error: str | None,
+    profiles: dict | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    if not apps_error:
+        return None, None, None
+    err = apps_error.lower()
+    if "mc protected" in err:
+        detail = "MDM policy blocks USB app enumeration (lockdownd: MC protected)."
+        if isinstance(profiles, dict) and profiles.get("has_mdm_payloads"):
+            detail += " MDM payloads detected."
+        return "MC_PROTECTED", "MDM", detail
+    if "not paired" in err or "pair" in err:
+        return "NOT_PAIRED", "PAIRING", "Device is not paired or pairing was denied."
+    if "timeout" in err:
+        return "TIMEOUT", "USB", "USB communication timed out."
+    return "UNKNOWN", None, "Unknown error."
+
+
 def load_app_store_cache(path: str) -> dict:
     if not path or not os.path.exists(path):
         return {}
@@ -237,20 +256,25 @@ VPN_PAYLOAD_TYPE_CONFIDENCE = {
     "com.apple.networkextension": "medium",
 }
 
+MDM_PAYLOAD_TYPE_CONFIDENCE = {
+    "com.apple.mdm": "high",
+}
+
+
+def find_payload_dicts(obj):
+    found = []
+    if isinstance(obj, dict):
+        if "PayloadType" in obj and isinstance(obj.get("PayloadType"), str):
+            found.append(obj)
+        for v in obj.values():
+            found.extend(find_payload_dicts(v))
+    elif isinstance(obj, list):
+        for i in obj:
+            found.extend(find_payload_dicts(i))
+    return found
+
 
 def extract_vpn_payloads(parsed: dict) -> list[dict]:
-    def find_payload_dicts(obj):
-        found = []
-        if isinstance(obj, dict):
-            if "PayloadType" in obj and isinstance(obj.get("PayloadType"), str):
-                found.append(obj)
-            for v in obj.values():
-                found.extend(find_payload_dicts(v))
-        elif isinstance(obj, list):
-            for i in obj:
-                found.extend(find_payload_dicts(i))
-        return found
-
     payloads = []
     seen = set()
     for payload in find_payload_dicts(parsed):
@@ -277,6 +301,33 @@ def extract_vpn_payloads(parsed: dict) -> list[dict]:
     return payloads
 
 
+def extract_mdm_payloads(parsed: dict) -> list[dict]:
+    payloads = []
+    seen = set()
+    for payload in find_payload_dicts(parsed):
+        payload_type = payload.get("PayloadType")
+        if payload_type not in MDM_PAYLOAD_TYPE_CONFIDENCE:
+            continue
+        key = (
+            payload_type,
+            payload.get("PayloadIdentifier"),
+            payload.get("PayloadUUID"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        payloads.append(
+            {
+                "payload_type": payload_type,
+                "payload_identifier": payload.get("PayloadIdentifier"),
+                "payload_display_name": payload.get("PayloadDisplayName"),
+                "payload_uuid": payload.get("PayloadUUID"),
+                "confidence": MDM_PAYLOAD_TYPE_CONFIDENCE.get(payload_type),
+            }
+        )
+    return payloads
+
+
 def cfgutil_get_profiles_summary(udid: str) -> dict:
     """
     只做「裝置層級」的摘要，不解析內容。
@@ -295,6 +346,9 @@ def cfgutil_get_profiles_summary(udid: str) -> dict:
         "vpn_payloads_count": None,
         "has_vpn_payloads": None,
         "vpn_payloads": None,
+        "mdm_payloads_count": None,
+        "has_mdm_payloads": None,
+        "mdm_payloads": None,
     }
 
     ecid = ideviceinfo_k(udid, "UniqueChipID")
@@ -332,6 +386,7 @@ def cfgutil_get_profiles_summary(udid: str) -> dict:
     cfg = find_lists(parsed, "configurationProfiles")
     prov = find_lists(parsed, "provisioningProfiles")
     vpn_payloads = extract_vpn_payloads(parsed)
+    mdm_payloads = extract_mdm_payloads(parsed)
 
     result["configuration_profiles_count"] = len(cfg)
     result["provisioning_profiles_count"] = len(prov)
@@ -340,6 +395,9 @@ def cfgutil_get_profiles_summary(udid: str) -> dict:
     result["vpn_payloads_count"] = len(vpn_payloads)
     result["has_vpn_payloads"] = len(vpn_payloads) > 0
     result["vpn_payloads"] = vpn_payloads
+    result["mdm_payloads_count"] = len(mdm_payloads)
+    result["has_mdm_payloads"] = len(mdm_payloads) > 0
+    result["mdm_payloads"] = mdm_payloads
     return result
 
 
@@ -727,10 +785,18 @@ def classify_apps(
         if bl in vpn_overrides:
             vpn_apps.append(bundle_id)
 
+    app_list_error_code, app_list_error_reason, app_list_error_detail = app_list_error_info(
+        apps_error,
+        profiles,
+    )
+
     return {
         "_comment": "App 能力分類（依應用程式設計行為模型推定，非即時狀態）",
         "app_list_complete": apps_error is None,
         "app_list_error": apps_error,
+        "app_list_error_code": app_list_error_code,
+        "app_list_error_reason": app_list_error_reason,
+        "app_list_error_detail": app_list_error_detail,
 
         "location_capable_apps": {
             "_comment": "具備定位功能或高度可能使用定位服務的 App（不代表目前是否啟用定位）",

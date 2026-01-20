@@ -23,6 +23,7 @@ This toolset inventories device metadata, summarizes profile signals, enumerates
 - App Store metadata lookup (sends bundle IDs to Apple): `python3 tools/ios_usb_audit.py --app-store`
   - Cache: `./cache/app_store_cache.json`
 - VPN profile payload detection (via `cfgutil` JSON payloads)
+- MDM payload detection (via `cfgutil` JSON payloads)
 
 ## Requirements (macOS)
 Install dependencies:
