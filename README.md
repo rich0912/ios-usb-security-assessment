@@ -20,10 +20,17 @@ This toolset inventories device metadata, summarizes profile signals, enumerates
 
 ## Optional Accuracy Signals
 - Bundle ID overrides: `rules/app_bundle_overrides.json`
+- App rules (keywords + App Store category mapping): `rules/app_rules.json` (override path with `--app-rules`)
 - App Store metadata lookup (sends bundle IDs to Apple): `python3 tools/ios_usb_audit.py --app-store`
   - Cache: `./cache/app_store_cache.json`
+- App Store countries: set `app_store_countries` in `rules/app_rules.json` or use `--app-store-country` / `--app-store-countries`
+- Suspected non-App Store apps: only when App Store lookup is not found in all configured countries
 - VPN profile payload detection (via `cfgutil` JSON payloads)
 - MDM payload detection (via `cfgutil` JSON payloads)
 
 ## Requirements (macOS)
 Install dependencies:
+
+## Testing
+Run unit tests and report snapshot checks:
+`python3 -m unittest discover -s tests`

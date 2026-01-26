@@ -53,6 +53,47 @@ def normalize_bundle_id(bundle_id: str) -> str:
     return bundle_id.strip().lower()
 
 
+_BIDI_CONTROL_CHARS = {
+    "\u061c",  # Arabic Letter Mark
+    "\u200e",  # Left-to-Right Mark
+    "\u200f",  # Right-to-Left Mark
+    "\u202a",  # Left-to-Right Embedding
+    "\u202b",  # Right-to-Left Embedding
+    "\u202c",  # Pop Directional Formatting
+    "\u202d",  # Left-to-Right Override
+    "\u202e",  # Right-to-Left Override
+    "\u2066",  # Left-to-Right Isolate
+    "\u2067",  # Right-to-Left Isolate
+    "\u2068",  # First Strong Isolate
+    "\u2069",  # Pop Directional Isolate
+    "\ufeff",  # Byte Order Mark
+}
+
+
+def strip_bidi_controls(text: str | None) -> str | None:
+    if text is None:
+        return None
+    return "".join(ch for ch in text if ch not in _BIDI_CONTROL_CHARS)
+
+
+def normalize_apps_list(apps: list[dict]) -> list[dict]:
+    normalized = []
+    for app in apps:
+        if not isinstance(app, dict):
+            continue
+        bundle_id = app.get("bundle_id")
+        if not bundle_id:
+            continue
+        normalized.append(
+            {
+                "bundle_id": bundle_id,
+                "display_name": strip_bidi_controls(app.get("display_name")),
+                "version": app.get("version"),
+            }
+        )
+    return sorted(normalized, key=lambda item: normalize_bundle_id(item["bundle_id"]))
+
+
 def load_json_file(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -119,6 +160,113 @@ def load_bundle_overrides(path: str) -> dict:
     return {"location": location, "location_exclude": location_exclude, "vpn": vpn}
 
 
+APP_RULES_EMPTY = {
+    "location_features": [],
+    "app_store_category_rules": [],
+    "app_store_countries": [],
+    "multi_device_login_keywords": [],
+    "vpn_keywords": [],
+    "payment_keywords": [],
+}
+
+ALLOWED_CONFIDENCE = {"low", "medium", "high"}
+
+
+def normalize_country_list(raw) -> list[str]:
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        raw = [x.strip() for x in raw.split(",")]
+    if not isinstance(raw, list):
+        return []
+    countries = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        code = item.strip().lower()
+        if code:
+            countries.append(code)
+    return list(dict.fromkeys(countries))
+
+
+def load_app_rules(path: str) -> dict:
+    if not path or not os.path.exists(path):
+        print(f"[WARN] App rules not found: {path}", file=sys.stderr, flush=True)
+        return dict(APP_RULES_EMPTY)
+    try:
+        data = load_json_file(path)
+    except Exception as exc:
+        print(f"[WARN] Failed to load app rules: {exc}", file=sys.stderr, flush=True)
+        return dict(APP_RULES_EMPTY)
+    if not isinstance(data, dict):
+        print("[WARN] App rules JSON must be an object.", file=sys.stderr, flush=True)
+        return dict(APP_RULES_EMPTY)
+
+    def clean_keywords(raw) -> list[str]:
+        if not isinstance(raw, list):
+            return []
+        cleaned = []
+        for item in raw:
+            if not isinstance(item, str):
+                continue
+            text = item.strip()
+            if text:
+                cleaned.append(text)
+        return cleaned
+
+    location_features = []
+    for raw in data.get("location_features", []):
+        if not isinstance(raw, dict):
+            continue
+        feature_id = raw.get("id")
+        label = raw.get("label")
+        if not feature_id or not label:
+            continue
+        confidence = raw.get("confidence") if raw.get("confidence") in ALLOWED_CONFIDENCE else "low"
+        keywords = clean_keywords(raw.get("keywords"))
+        location_features.append(
+            {
+                "id": feature_id,
+                "label": label,
+                "confidence": confidence,
+                "keywords": keywords,
+            }
+        )
+
+    app_store_category_rules = []
+    for raw in data.get("app_store_category_rules", []):
+        if not isinstance(raw, dict):
+            continue
+        genre = raw.get("genre")
+        feature_id = raw.get("feature_id")
+        if not genre or not feature_id:
+            continue
+        confidence = raw.get("confidence") if raw.get("confidence") in ALLOWED_CONFIDENCE else "low"
+        requires_signal = bool(raw.get("requires_signal"))
+        app_store_category_rules.append(
+            {
+                "genre": genre,
+                "feature_id": feature_id,
+                "confidence": confidence,
+                "requires_signal": requires_signal,
+            }
+        )
+
+    multi_device_keywords = [k.lower() for k in clean_keywords(data.get("multi_device_login_keywords"))]
+    vpn_keywords = [k.lower() for k in clean_keywords(data.get("vpn_keywords"))]
+    payment_keywords = [k.lower() for k in clean_keywords(data.get("payment_keywords"))]
+    app_store_countries = normalize_country_list(data.get("app_store_countries"))
+
+    return {
+        "location_features": location_features,
+        "app_store_category_rules": app_store_category_rules,
+        "app_store_countries": app_store_countries,
+        "multi_device_login_keywords": multi_device_keywords,
+        "vpn_keywords": vpn_keywords,
+        "payment_keywords": payment_keywords,
+    }
+
+
 def app_list_error_info(
     apps_error: str | None,
     profiles: dict | None = None,
@@ -155,10 +303,12 @@ def save_app_store_cache(path: str, cache: dict):
     save_json_file(path, cache)
 
 
-def fetch_app_store_metadata(bundle_id: str, timeout: int = 8) -> dict:
+def fetch_app_store_metadata(bundle_id: str, country: str, timeout: int = 8) -> dict:
     url = (
         "https://itunes.apple.com/lookup?bundleId="
         + urllib.parse.quote(bundle_id)
+        + "&country="
+        + urllib.parse.quote(country)
     )
     req = urllib.request.Request(
         url,
@@ -168,6 +318,7 @@ def fetch_app_store_metadata(bundle_id: str, timeout: int = 8) -> dict:
         "bundle_id": bundle_id,
         "found": False,
         "checked_at": utc_now_iso(),
+        "country": country,
     }
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -190,28 +341,60 @@ def fetch_app_store_metadata(bundle_id: str, timeout: int = 8) -> dict:
     return result
 
 
+def app_store_cache_key(bundle_id: str, countries: list[str]) -> str:
+    return f"{normalize_bundle_id(bundle_id)}|{','.join(countries)}"
+
+
 def collect_app_store_metadata(
     apps: list[dict],
     cache: dict,
+    countries: list[str],
     timeout: int = 8,
     max_requests: int = 0,
 ) -> dict:
     results = {}
     looked_up = 0
+    countries = normalize_country_list(countries)
+    if not countries:
+        countries = ["us"]
     for app in apps:
         bundle_id = app.get("bundle_id")
         if not bundle_id:
             continue
-        key = normalize_bundle_id(bundle_id)
-        if key in cache:
-            results[key] = cache[key]
+        cache_key = app_store_cache_key(bundle_id, countries)
+        if cache_key in cache:
+            results[normalize_bundle_id(bundle_id)] = cache[cache_key]
             continue
         if max_requests and looked_up >= max_requests:
             continue
-        meta = fetch_app_store_metadata(bundle_id, timeout=timeout)
-        cache[key] = meta
-        results[key] = meta
-        looked_up += 1
+        meta = {
+            "bundle_id": bundle_id,
+            "found": False,
+            "checked_at": utc_now_iso(),
+            "countries_tried": [],
+        }
+        errors = []
+        for country in countries:
+            if max_requests and looked_up >= max_requests:
+                meta["partial"] = True
+                break
+            resp = fetch_app_store_metadata(bundle_id, country, timeout=timeout)
+            looked_up += 1
+            meta["countries_tried"].append(country)
+            if resp.get("error"):
+                errors.append(resp.get("error"))
+                continue
+            if resp.get("found"):
+                meta.update(resp)
+                meta["found"] = True
+                meta["country"] = country
+                break
+        if errors:
+            meta["errors"] = errors
+        if not meta.get("found") and not errors and not meta.get("partial"):
+            meta["not_found"] = True
+        cache[cache_key] = meta
+        results[normalize_bundle_id(bundle_id)] = meta
     return results
 
 
@@ -301,6 +484,99 @@ def extract_vpn_payloads(parsed: dict) -> list[dict]:
     return payloads
 
 
+def extract_configuration_profiles(profiles: list) -> list[dict]:
+    summaries = []
+    seen = set()
+
+    def pick_value(profile: dict, *keys):
+        for key in keys:
+            value = profile.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        summary = {}
+        display_name = pick_value(
+            profile,
+            "PayloadDisplayName",
+            "ProfileDisplayName",
+            "ProfileName",
+            "displayName",
+            "name",
+        )
+        identifier = pick_value(
+            profile,
+            "PayloadIdentifier",
+            "ProfileIdentifier",
+            "identifier",
+        )
+        uuid = pick_value(profile, "PayloadUUID", "ProfileUUID", "uuid")
+        organization = pick_value(
+            profile,
+            "PayloadOrganization",
+            "ProfileOrganization",
+            "organization",
+        )
+        description = pick_value(
+            profile,
+            "PayloadDescription",
+            "ProfileDescription",
+            "description",
+        )
+        payload_type = pick_value(profile, "PayloadType", "payloadType")
+        payload_scope = pick_value(profile, "PayloadScope", "payloadScope")
+        payload_version = pick_value(profile, "PayloadVersion", "payloadVersion", "version")
+        removal_disallowed = pick_value(
+            profile,
+            "PayloadRemovalDisallowed",
+            "ProfileRemovalDisallowed",
+            "removalDisallowed",
+        )
+        has_removal_password = pick_value(profile, "HasRemovalPassword", "hasRemovalPassword")
+        install_date = pick_value(
+            profile,
+            "ProfileInstallDate",
+            "ProfileInstallDateUTC",
+            "InstallDate",
+            "installDate",
+        )
+
+        if display_name is not None:
+            summary["display_name"] = display_name
+        if identifier is not None:
+            summary["identifier"] = identifier
+        if uuid is not None:
+            summary["uuid"] = uuid
+        if organization is not None:
+            summary["organization"] = organization
+        if description is not None:
+            summary["description"] = description
+        if payload_type is not None:
+            summary["payload_type"] = payload_type
+        if payload_scope is not None:
+            summary["payload_scope"] = payload_scope
+        if payload_version is not None:
+            summary["version"] = payload_version
+        if removal_disallowed is not None:
+            summary["removal_disallowed"] = removal_disallowed
+        if has_removal_password is not None:
+            summary["has_removal_password"] = has_removal_password
+        if install_date is not None:
+            summary["install_date"] = install_date
+
+        if not summary:
+            continue
+        key = (summary.get("identifier"), summary.get("uuid"), summary.get("display_name"))
+        if key in seen:
+            continue
+        seen.add(key)
+        summaries.append(summary)
+    return summaries
+
+
 def extract_mdm_payloads(parsed: dict) -> list[dict]:
     payloads = []
     seen = set()
@@ -385,13 +661,15 @@ def cfgutil_get_profiles_summary(udid: str) -> dict:
 
     cfg = find_lists(parsed, "configurationProfiles")
     prov = find_lists(parsed, "provisioningProfiles")
+    cfg_profiles = extract_configuration_profiles(cfg)
     vpn_payloads = extract_vpn_payloads(parsed)
     mdm_payloads = extract_mdm_payloads(parsed)
 
-    result["configuration_profiles_count"] = len(cfg)
+    result["configuration_profiles_count"] = len(cfg_profiles) if cfg_profiles else len(cfg)
     result["provisioning_profiles_count"] = len(prov)
-    result["has_configuration_profiles"] = len(cfg) > 0
+    result["has_configuration_profiles"] = result["configuration_profiles_count"] > 0
     result["has_provisioning_profiles"] = len(prov) > 0
+    result["configuration_profiles"] = cfg_profiles
     result["vpn_payloads_count"] = len(vpn_payloads)
     result["has_vpn_payloads"] = len(vpn_payloads) > 0
     result["vpn_payloads"] = vpn_payloads
@@ -493,125 +771,28 @@ def app_haystack(app: dict) -> str:
     return " ".join([p for p in parts if p]).lower()
 
 
+def normalize_keywords(values: list[str]) -> list[str]:
+    keywords = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        cleaned = value.strip().lower()
+        if cleaned:
+            keywords.append(cleaned)
+    return sorted(set(keywords))
+
+
 # ============================================================
 # App 分類規則（核心）
 # ============================================================
 
-# ① 具備定位能力的 App（推定）
-LOCATION_FEATURE_RULES = [
-    {
-        "id": "navigation_maps",
-        "label": "導航/地圖",
-        "confidence": "high",
-        "keywords": [
-            "maps", "navigation", "navi", "gps",
-            "waze", "tomtom", "here", "garmin", "naviking", "sygic", "mapbox",
-            "地圖", "導航", "定位",
-        ],
-    },
-    {
-        "id": "ride_hailing",
-        "label": "叫車/計程車",
-        "confidence": "high",
-        "keywords": [
-            "uber", "lyft", "grab", "gojek", "bolt", "didi", "careem", "taxi",
-            "叫車", "計程車",
-        ],
-    },
-    {
-        "id": "delivery",
-        "label": "外送/配送",
-        "confidence": "medium",
-        "keywords": [
-            "foodpanda", "ubereats", "doordash", "deliveroo", "wolt",
-            "grubhub", "postmates", "gopuff", "meituan", "eleme",
-            "外送", "配送",
-        ],
-    },
-    {
-        "id": "shared_mobility",
-        "label": "共享交通/單車/機車",
-        "confidence": "medium",
-        "keywords": [
-            "lime", "bird", "gogoro", "scooter", "bikeshare",
-            "youbike", "ubike", "mobike",
-            "共享單車", "單車", "腳踏車", "機車",
-        ],
-    },
-    {
-        "id": "weather",
-        "label": "天氣/氣象",
-        "confidence": "low",
-        "keywords": [
-            "weather", "windy", "accuweather", "weathernews", "meteo",
-            "天氣", "氣象",
-        ],
-    },
-    {
-        "id": "travel",
-        "label": "旅遊/交通",
-        "confidence": "low",
-        "keywords": [],
-    },
-    {
-        "id": "parking_road",
-        "label": "停車/道路",
-        "confidence": "low",
-        "keywords": [
-            "parking", "easypark", "toll", "etag",
-            "停車", "路況",
-        ],
-    },
-]
-
 LOCATION_CONFIDENCE_RANK = {"low": 1, "medium": 2, "high": 3}
 LOCATION_CONFIDENCE_LABEL = {1: "low", 2: "medium", 3: "high"}
 
-APP_STORE_CATEGORY_RULES = [
-    {
-        "genre": "Navigation",
-        "feature_id": "navigation_maps",
-        "confidence": "high",
-        "requires_signal": False,
-    },
-    {
-        "genre": "Weather",
-        "feature_id": "weather",
-        "confidence": "low",
-        "requires_signal": False,
-    },
-    {
-        "genre": "Travel",
-        "feature_id": "travel",
-        "confidence": "low",
-        "requires_signal": True,
-    },
-    {
-        "genre": "Food & Drink",
-        "feature_id": "delivery",
-        "confidence": "medium",
-        "requires_signal": True,
-    },
-]
-
-# ② 同帳號可於多部裝置同時登入使用的 App（推定）
-DEFAULT_MULTI_DEVICE_LOGIN_KEYWORDS = [
-    "telegram", "whatsapp", "wechat", "line",
-    "slack", "teams", "discord",
-    "gmail", "outlook",
-    "facebook", "instagram", "twitter", "x",
-    "dropbox", "onedrive", "google", "drive",
-]
-
-# ③ VPN App（作為 VPN 存在的實務判斷依據）
-DEFAULT_VPN_APP_KEYWORDS = [
-    "wireguard", "openvpn", "nordvpn", "expressvpn",
-    "protonvpn", "surfshark", "mullvad",
-    "forticlient", "fortinet",
-]
-
 def analyze_location_apps(
     apps: list[dict],
+    location_features: list[dict],
+    app_store_category_rules: list[dict],
     location_overrides: dict | None = None,
     location_exclude: set[str] | None = None,
     app_store_data: dict | None = None,
@@ -620,8 +801,10 @@ def analyze_location_apps(
     evidence = {}
     features = {}
     summary = {"high": 0, "medium": 0, "low": 0}
-    feature_by_id = {rule["id"]: rule for rule in LOCATION_FEATURE_RULES}
-    app_store_rules = {rule["genre"].lower(): rule for rule in APP_STORE_CATEGORY_RULES}
+    feature_by_id = {rule["id"]: rule for rule in location_features}
+    app_store_rules = {
+        rule["genre"].lower(): rule for rule in app_store_category_rules if isinstance(rule.get("genre"), str)
+    }
     location_overrides = location_overrides or {}
     location_exclude = location_exclude or set()
     app_store_data = app_store_data or {}
@@ -684,7 +867,7 @@ def analyze_location_apps(
                     "bundle_id_rule",
                 )
 
-        for rule in LOCATION_FEATURE_RULES:
+        for rule in location_features:
             if not rule.get("keywords"):
                 continue
             matched_keywords = [kw for kw in rule["keywords"] if kw.lower() in haystack]
@@ -750,26 +933,138 @@ def analyze_location_apps(
     return sorted(matched_apps), evidence, features, summary
 
 
+def analyze_non_app_store_apps(apps: list[dict], app_store_data: dict) -> tuple[list[str], dict]:
+    items = []
+    evidence = {}
+    for app in apps:
+        bundle_id = app.get("bundle_id")
+        if not bundle_id:
+            continue
+        key = normalize_bundle_id(bundle_id)
+        meta = app_store_data.get(key)
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("found"):
+            continue
+        if meta.get("errors") or meta.get("partial"):
+            continue
+        if not meta.get("not_found"):
+            continue
+        items.append(bundle_id)
+        evidence[bundle_id] = {
+            "app_store_found": False,
+            "checked_at": meta.get("checked_at"),
+            "countries_tried": meta.get("countries_tried") or [],
+        }
+    return sorted(set(items)), evidence
+
+
+def analyze_payment_apps(apps: list[dict], payment_keywords: list[str]) -> tuple[list[str], dict]:
+    items = []
+    evidence = {}
+    if not payment_keywords:
+        return items, evidence
+    for app in apps:
+        bundle_id = app.get("bundle_id")
+        if not bundle_id:
+            continue
+        haystack = app_haystack(app)
+        matched = [kw for kw in payment_keywords if kw in haystack]
+        if not matched:
+            continue
+        items.append(bundle_id)
+        evidence[bundle_id] = {
+            "matched_keywords": matched,
+            "display_name": app.get("display_name"),
+        }
+    return sorted(set(items)), evidence
+
+
+def summarize_app_store_presence(apps: list[dict], app_store_data: dict) -> dict:
+    summary = {
+        "_comment": "App Store 查詢結果（依安裝 App）",
+        "found": [],
+        "not_found": [],
+        "errors": [],
+    }
+    seen = set()
+    for app in apps:
+        bundle_id = app.get("bundle_id")
+        if not bundle_id:
+            continue
+        key = normalize_bundle_id(bundle_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        meta = app_store_data.get(key)
+        if not isinstance(meta, dict):
+            continue
+        entry = {"bundle_id": bundle_id}
+        display_name = app.get("display_name")
+        if display_name:
+            entry["display_name"] = display_name
+        if meta.get("found"):
+            entry["country"] = meta.get("country")
+            track_name = meta.get("track_name")
+            if track_name:
+                entry["track_name"] = track_name
+            primary_genre = meta.get("primary_genre")
+            if primary_genre:
+                entry["primary_genre"] = primary_genre
+            summary["found"].append(entry)
+        elif meta.get("not_found"):
+            entry["countries_tried"] = meta.get("countries_tried") or []
+            summary["not_found"].append(entry)
+        elif meta.get("errors") or meta.get("partial"):
+            entry["countries_tried"] = meta.get("countries_tried") or []
+            if meta.get("errors"):
+                entry["errors"] = meta.get("errors")
+            if meta.get("partial"):
+                entry["partial"] = True
+            summary["errors"].append(entry)
+    for key in ("found", "not_found", "errors"):
+        summary[key] = sorted(summary[key], key=lambda item: item.get("bundle_id") or "")
+    return summary
+
+
 def classify_apps(
     apps: list[dict],
     profiles: dict | None,
     apps_error: str | None = None,
     bundle_overrides: dict | None = None,
     app_store_data: dict | None = None,
+    app_rules: dict | None = None,
 ) -> dict:
     """
     App 分類結果（全部為『能力/特性推定』，非即時狀態）
     """
     bundle_overrides = bundle_overrides or {}
+    app_rules = app_rules or dict(APP_RULES_EMPTY)
+    app_store_lookup_enabled = app_store_data is not None
+    app_store_data = app_store_data or {}
     location_overrides = bundle_overrides.get("location") or {}
     location_exclude = bundle_overrides.get("location_exclude") or set()
     vpn_overrides = bundle_overrides.get("vpn") or set()
+    location_feature_rules = app_rules.get("location_features") or []
+    app_store_category_rules = app_rules.get("app_store_category_rules") or []
+    multi_device_keywords = app_rules.get("multi_device_login_keywords") or []
+    vpn_keywords = app_rules.get("vpn_keywords") or []
+    payment_keywords = normalize_keywords(app_rules.get("payment_keywords") or [])
     location_items, location_evidence, location_features, location_summary = analyze_location_apps(
         apps,
+        location_feature_rules,
+        app_store_category_rules,
         location_overrides=location_overrides,
         location_exclude=location_exclude,
         app_store_data=app_store_data,
     )
+    non_appstore_items = []
+    non_appstore_evidence = {}
+    app_store_lookup_summary = {}
+    if app_store_lookup_enabled:
+        non_appstore_items, non_appstore_evidence = analyze_non_app_store_apps(apps, app_store_data)
+        app_store_lookup_summary = summarize_app_store_presence(apps, app_store_data)
+    payment_items, payment_evidence = analyze_payment_apps(apps, payment_keywords)
     multi_device = []
     vpn_apps = []
 
@@ -778,9 +1073,9 @@ def classify_apps(
         if not bundle_id:
             continue
         bl = normalize_bundle_id(bundle_id)
-        if any(k in bl for k in DEFAULT_MULTI_DEVICE_LOGIN_KEYWORDS):
+        if any(k in bl for k in multi_device_keywords):
             multi_device.append(bundle_id)
-        if any(k in bl for k in DEFAULT_VPN_APP_KEYWORDS):
+        if any(k in bl for k in vpn_keywords):
             vpn_apps.append(bundle_id)
         if bl in vpn_overrides:
             vpn_apps.append(bundle_id)
@@ -789,9 +1084,12 @@ def classify_apps(
         apps_error,
         profiles,
     )
+    apps_list = normalize_apps_list(apps)
 
     return {
         "_comment": "App 能力分類（依應用程式設計行為模型推定，非即時狀態）",
+        "apps_total_count": len(apps_list),
+        "apps_list": apps_list,
         "app_list_complete": apps_error is None,
         "app_list_error": apps_error,
         "app_list_error_code": app_list_error_code,
@@ -812,9 +1110,19 @@ def classify_apps(
         },
 
         "non_app_store_suspected_apps": {
-            "_comment": "疑似非 App Store 安裝的 App（僅能透過人工標記或 MDM 驗證；USB 工具無法直接判定）",
-            "items": []
+            "_comment": (
+                "疑似非 App Store 安裝的 App（App Store 查詢未找到即列入，"
+                "仍需人工或 MDM 驗證）"
+            ),
+            "items": non_appstore_items,
+            "evidence": non_appstore_evidence,
         },
+        "payment_apps": {
+            "_comment": "第三方支付工具（可能推定消費地點）",
+            "items": payment_items,
+            "evidence": payment_evidence,
+        },
+        "app_store_lookup_summary": app_store_lookup_summary,
 
         "vpn_apps_detected": {
             "_comment": "偵測到的 VPN App（作為裝置存在 VPN 能力的實務判斷依據）",
@@ -880,14 +1188,24 @@ def main():
     default_rules_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "rules", "app_bundle_overrides.json")
     )
+    default_app_rules_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "rules", "app_rules.json")
+    )
     parser = argparse.ArgumentParser(description="iOS USB 掃描工具（App 能力分類 + VPN 判斷）")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--out", default="./reports")
     parser.add_argument("--bundle-rules", default=default_rules_path, help="Bundle ID overrides JSON")
+    parser.add_argument("--app-rules", default=default_app_rules_path, help="App rules JSON")
     parser.add_argument("--app-store", action="store_true", help="Enable App Store metadata lookup")
     parser.add_argument("--app-store-cache", default="./cache/app_store_cache.json", help="App Store cache file")
     parser.add_argument("--app-store-timeout", type=int, default=8, help="App Store request timeout (s)")
-    parser.add_argument("--app-store-max", type=int, default=0, help="Max App Store lookups (0 = no limit)")
+    parser.add_argument("--app-store-max", type=int, default=0, help="Max App Store requests (0 = no limit)")
+    parser.add_argument("--app-store-country", default=None, help="App Store country code (e.g. tw)")
+    parser.add_argument(
+        "--app-store-countries",
+        default=None,
+        help="Comma-separated App Store country codes (overrides rules)",
+    )
     args = parser.parse_args()
 
     require_tool("idevice_id", "brew install libimobiledevice")
@@ -897,6 +1215,14 @@ def main():
     udids = detect_udids()
     ensure_dir(args.out)
     bundle_overrides = load_bundle_overrides(args.bundle_rules)
+    app_rules = load_app_rules(args.app_rules)
+    app_store_countries = []
+    if args.app_store_countries:
+        app_store_countries = normalize_country_list(args.app_store_countries)
+    elif args.app_store_country:
+        app_store_countries = normalize_country_list([args.app_store_country])
+    elif app_rules.get("app_store_countries"):
+        app_store_countries = normalize_country_list(app_rules.get("app_store_countries"))
     app_store_cache = load_app_store_cache(args.app_store_cache) if args.app_store else {}
 
     if not udids:
@@ -923,6 +1249,7 @@ def main():
             app_store_data = collect_app_store_metadata(
                 apps,
                 app_store_cache,
+                app_store_countries,
                 timeout=args.app_store_timeout,
                 max_requests=args.app_store_max,
             )
@@ -935,6 +1262,7 @@ def main():
             apps_err,
             bundle_overrides=bundle_overrides,
             app_store_data=app_store_data,
+            app_rules=app_rules,
         )
         vpn = build_vpn_presence(classification, profiles)
 

@@ -1,0 +1,122 @@
+{
+  "_comment": "Primary ruleset for app capability classification.",
+  "location_features": [
+    {
+      "id": "navigation_maps",
+      "label": "導航/地圖",
+      "confidence": "high",
+      "keywords": [
+        "maps", "navigation", "navi", "gps",
+        "waze", "tomtom", "here", "garmin", "naviking", "sygic", "mapbox",
+        "地圖", "導航", "定位"
+      ]
+    },
+    {
+      "id": "ride_hailing",
+      "label": "叫車/計程車",
+      "confidence": "high",
+      "keywords": [
+        "uber", "lyft", "grab", "gojek", "bolt", "didi", "careem", "taxi",
+        "叫車", "計程車"
+      ]
+    },
+    {
+      "id": "delivery",
+      "label": "外送/配送",
+      "confidence": "medium",
+      "keywords": [
+        "foodpanda", "ubereats", "doordash", "deliveroo", "wolt",
+        "grubhub", "postmates", "gopuff", "meituan", "eleme",
+        "外送", "配送"
+      ]
+    },
+    {
+      "id": "shared_mobility",
+      "label": "共享交通/單車/機車",
+      "confidence": "medium",
+      "keywords": [
+        "lime", "bird", "gogoro", "scooter", "bikeshare",
+        "youbike", "ubike", "mobike",
+        "共享單車", "單車", "腳踏車", "機車"
+      ]
+    },
+    {
+      "id": "weather",
+      "label": "天氣/氣象",
+      "confidence": "low",
+      "keywords": [
+        "weather", "windy", "accuweather", "weathernews", "meteo",
+        "天氣", "氣象"
+      ]
+    },
+    {
+      "id": "travel",
+      "label": "旅遊/交通",
+      "confidence": "low",
+      "keywords": []
+    },
+    {
+      "id": "parking_road",
+      "label": "停車/道路",
+      "confidence": "low",
+      "keywords": [
+        "parking", "easypark", "toll", "etag",
+        "停車", "路況"
+      ]
+    }
+  ],
+  "app_store_category_rules": [
+    {
+      "genre": "Navigation",
+      "feature_id": "navigation_maps",
+      "confidence": "high",
+      "requires_signal": false
+    },
+    {
+      "genre": "Weather",
+      "feature_id": "weather",
+      "confidence": "low",
+      "requires_signal": false
+    },
+    {
+      "genre": "Travel",
+      "feature_id": "travel",
+      "confidence": "low",
+      "requires_signal": true
+    },
+    {
+      "genre": "Food & Drink",
+      "feature_id": "delivery",
+      "confidence": "medium",
+      "requires_signal": true
+    }
+  ],
+  "app_store_countries": ["tw", "us", "cn", "hk", "jp", "kr", "sg", "au", "gb", "ca"],
+  "payment_keywords": [
+    "alipay", "支付宝", "支付寶",
+    "wechatpay", "wechat pay", "微信支付",
+    "linepay", "line pay", "line pay tw", "linepaytw", "linepaytw.upay",
+    "jkos", "街口",
+    "paypal",
+    "paypay",
+    "rakutenpay", "rakuten pay",
+    "grabpay", "grab pay",
+    "gcash",
+    "kakaopay", "kakao pay",
+    "toss",
+    "paytm",
+    "gopay"
+  ],
+  "multi_device_login_keywords": [
+    "telegram", "whatsapp", "wechat", "line",
+    "slack", "teams", "discord",
+    "gmail", "outlook",
+    "facebook", "instagram", "twitter",
+    "dropbox", "onedrive", "google", "drive"
+  ],
+  "vpn_keywords": [
+    "wireguard", "openvpn", "nordvpn", "expressvpn",
+    "protonvpn", "surfshark", "mullvad",
+    "forticlient", "fortinet"
+  ]
+}
